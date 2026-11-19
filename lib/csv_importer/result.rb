@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 module CsvImporter
+  # Lo que devuelve `call`: contadores y errores por fila.
   class Result
     attr_reader :created, :updated
 
