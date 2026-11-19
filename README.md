@@ -23,7 +23,11 @@ result.errors  # => [{ line: 5, message: "Correo: no puede estar vacío" }]
 
 ## Características
 
-- DSL declarativo: `model`, `column` y `find_by`.
+- DSL declarativo: `model`, `column`, `find_by`, `csv` y `after_map`.
+- Formatos habituales de los bancos: separador propio (`;`, `|`), cualquier
+  codificación (Windows-1252...), archivos sin fila de títulos y líneas previas.
+- Valores fijos por fila (`defaults:`) que el CSV no puede sobrescribir.
+- Gancho por fila (`after_map`) para campos calculados a partir de varias columnas.
 - Conversión de tipos y transformaciones por columna.
 - Las filas inválidas no detienen la importación: se acumulan con su número de fila.
 - Modo atómico: todo o nada, con transacción.
@@ -33,13 +37,16 @@ result.errors  # => [{ line: 5, message: "Correo: no puede estar vacío" }]
 
 ## Instalación
 
-Mientras no esté publicada, desde una ruta local, en el `Gemfile` de la aplicación:
+La gema no está en RubyGems. Se instala desde GitHub, fijando una etiqueta, en el
+`Gemfile` de la aplicación:
 
 ```ruby
-gem "csv_importer", path: "../csv_importer"
+gem "csv_importer", github: "cybertarius-code/csv_importer", tag: "v0.2.0"
 ```
 
-Luego `bundle install`.
+Luego `bundle install`. Usa siempre `tag:`: sin etiqueta, cada `bundle update`
+traería lo último de `main`. Evita `path:` salvo para desarrollar la gema en
+local, porque esa ruta no existe en la CI ni en el servidor.
 
 Probada con Ruby 3.4 y ActiveRecord 7 o superior. Con Ruby 3.4 o posterior,
 `csv` ya no forma parte de la biblioteca estándar; la gema la declara como
@@ -115,6 +122,69 @@ Los atributos que identifican un registro existente. Si hay una fila con esa
 clave en la base de datos, se actualiza; si no, se crea. Cada atributo debe estar
 declarado como `column`. Sin `find_by`, todas las filas se crean.
 
+### `csv(**opciones)`
+
+El formato del archivo. Todas las opciones son opcionales:
+
+| Opción | Por defecto | Descripción |
+|---|---|---|
+| `col_sep:` | `","` | Separador de columnas: `";"`, `"\|"`, `"\t"`... |
+| `encoding:` | `"bom\|utf-8"` | Codificación del archivo. Si no es UTF-8, el texto se convierte a UTF-8 al leerlo: `"Windows-1252"` equivale a `"Windows-1252:UTF-8"`. |
+| `headers:` | — | Para archivos **sin fila de títulos**: los nombres de las columnas, en orden. Los `header:` de las columnas se refieren a estos nombres. |
+| `skip_lines:` | `0` | Líneas que se saltan al principio (el banco suele poner el titular, la cuenta o el periodo antes de los títulos). |
+
+Una opción desconocida o inválida (una codificación que no existe, `skip_lines: -1`)
+lanza `CsvImporter::ConfigurationError` al declarar la clase.
+
+```ruby
+# Extracto con ";" en Windows-1252 y dos líneas antes de los títulos
+class BbvaStatement < CsvImporter::Base
+  model ImportRow
+  csv col_sep: ";", encoding: "Windows-1252", skip_lines: 2
+
+  column :date,        header: "Fecha", transform: ->(v) { Date.strptime(v, "%d/%m/%Y") }
+  column :description, header: "Concepto"
+end
+
+# Extracto sin títulos, separado por "|"
+class SabadellStatement < CsvImporter::Base
+  model ImportRow
+  csv col_sep: "|", encoding: "Windows-1252",
+      headers: %w[fecha concepto fecha_valor importe saldo ref1 ref2]
+
+  column :date,         header: "fecha", required: true,
+                        transform: ->(v) { Date.strptime(v, "%d/%m/%Y") }
+  column :description,  header: "concepto", required: true
+  column :amount_cents, header: "importe", type: :decimal, transform: ->(v) { (v * 100).to_i }
+end
+```
+
+### `after_map`
+
+Un gancho que se ejecuta en cada fila después de convertirla. Recibe los
+atributos (ya convertidos y con los `defaults:`) y la fila original del CSV
+(`{ "header" => "texto" }`). Sirve para campos que dependen de varias columnas:
+
+```ruby
+class CargoAbonoStatement < CsvImporter::Base
+  model ImportRow
+  column :charge, header: "Cargo", type: :decimal
+  column :credit, header: "Abono", type: :decimal
+
+  after_map do |attributes, _raw_row|
+    attributes[:amount] = (attributes.delete(:credit) || 0) - (attributes.delete(:charge) || 0)
+  end
+end
+```
+
+- Puede modificar `attributes` en sitio o devolver un `Hash` nuevo: si devuelve
+  un `Hash`, se guarda ese; si devuelve otra cosa, se guarda `attributes`.
+- Si lanza `CsvImporter::ConversionError`, la fila se reporta como error (con su
+  línea) y la importación sigue, igual que una celda mal formada. Cualquier otra
+  excepción se propaga: se considera un fallo de programación.
+- Acepta un bloque o cualquier objeto con `call(attributes, raw_row)`. Se pueden
+  declarar varios; se ejecutan en orden.
+
 ### Herencia
 
 Una subclase hereda la configuración y puede ampliarla o redefinir columnas sin
@@ -125,6 +195,10 @@ class AdminUserImporter < UserImporter
   column :role # se añade solo a este importador
 end
 ```
+
+Las opciones de `csv` se mezclan con las del padre (la subclase puede cambiar
+solo `skip_lines:`, por ejemplo) y los `after_map` del padre se ejecutan antes que
+los de la subclase.
 
 ## Tipos
 
@@ -165,12 +239,41 @@ la importación.
 | `success?` | `true` si no hubo ningún error |
 | `rolled_back?` | `true` si se revirtió una importación atómica |
 
-`line` es el número de registro del CSV, contando la cabecera como 1.
+`line` es la línea del archivo: cuenta las líneas saltadas con `skip_lines:` y la
+de títulos. Sin `skip_lines:`, el primer registro es la línea 2 o, con `headers:`
+(sin fila de títulos), la línea 1.
 
 ## Opciones
 
 ```ruby
-UserImporter.new(path, atomic: true, bulk: true, batch_size: 500).call
+UserImporter.new(path, atomic: true, bulk: true, batch_size: 500,
+                 defaults: { team_id: 3 }, after_map: ->(attributes, raw_row) { ... }).call
+```
+
+El formato del archivo y las columnas son de la clase; estas opciones son de cada
+ejecución.
+
+### `defaults:`
+
+Valores fijos que se añaden a cada fila, como la cuenta o la importación a la
+que pertenecen, que no vienen en el archivo:
+
+```ruby
+BankStatement.new(path, defaults: { import_id: import.id }).call
+```
+
+El CSV **no puede sobrescribirlos**: si una columna declarada tiene el mismo
+nombre, gana el valor de `defaults:`. Los ganchos `after_map` ya los ven.
+
+### `after_map:`
+
+Un gancho como el del DSL, para lo que depende de la ejecución (por ejemplo, una
+huella que incluye la cuenta). Se ejecuta después de los `after_map` de la clase.
+
+```ruby
+BankStatement.new(path, after_map: ->(attributes, raw_row) {
+  attributes[:import_ref] = Digest::SHA256.hexdigest([account.id, *raw_row.values].join("|"))
+}).call
 ```
 
 ### `atomic: true`
@@ -208,12 +311,49 @@ más rápido, pero **cede cosas**:
 
 Sin `find_by`, el modo masivo hace un `insert_all` y no detecta duplicados.
 
+## API pública sin DSL: `Importer` y `Column`
+
+`Base` es azúcar sobre `CsvImporter::Importer`, que se puede usar directamente
+cuando las columnas no se conocen al escribir el código (por ejemplo, un mapeo
+guardado en la base de datos por cada cuenta):
+
+```ruby
+columns = profile.columns.map do |c|
+  CsvImporter::Column.new(c.attribute, header: c.header, type: c.type, required: c.required)
+end
+
+result = CsvImporter::Importer.new(
+  path, ImportRow,
+  columns: columns,
+  csv: { col_sep: profile.col_sep, encoding: profile.encoding, skip_lines: profile.skip_lines },
+  defaults: { import_id: import.id },
+  after_map: ->(attributes, raw_row) { ... },
+  atomic: true
+).call
+```
+
+`CsvImporter::Column.new(atributo, header:, type:, required:, transform:)` acepta
+las mismas opciones que `column` en el DSL.
+
+`CsvImporter::Importer.new(file_path, model, **opciones)`:
+
+| Opción | Descripción |
+|---|---|
+| `columns:` | Lista de `Column` (obligatoria). |
+| `find_by:` | Lista de atributos, como `find_by` en el DSL. |
+| `csv:` | Hash con las opciones de `csv` (`col_sep:`, `encoding:`, `headers:`, `skip_lines:`). |
+| `defaults:`, `after_map:` | Como en `Base#new`. `after_map:` acepta uno o una lista. |
+| `atomic:`, `bulk:`, `batch_size:` | Como en `Base#new`. |
+
+Devuelve el mismo `CsvImporter::Result` al llamar a `call`.
+
 ## Errores
 
 | Excepción | Cuándo |
 |---|---|
-| `CsvImporter::ConfigurationError` | La clase está mal declarada (sin `model`, sin columnas, `find_by` con atributos que no son columnas) o falta el índice único en modo masivo. |
-| `CsvImporter::InvalidHeaderError` | Faltan headers declarados en el CSV. |
+| `CsvImporter::ConfigurationError` | La clase está mal declarada (sin `model`, sin columnas, `find_by` con atributos que no son columnas, opciones de `csv` inválidas, `after_map` sin `call`) o falta el índice único en modo masivo. |
+| `CsvImporter::InvalidHeaderError` | Faltan headers declarados en el CSV (o en `headers:`). |
+| `CsvImporter::InvalidFileError` | El archivo no se puede leer: CSV mal formado (comillas sin cerrar), codificación distinta de la indicada o bytes que no existen en ella. El mensaje dice la línea y, si es la codificación, cómo indicarla. |
 | `ArgumentError` | Un `type:` desconocido al declarar una columna. |
 
 Los problemas de datos (celdas vacías obligatorias, valores que no se pueden
@@ -246,9 +386,10 @@ bundle exec ruby benchmark/import_benchmark.rb [filas]
 
 ## Limitaciones conocidas
 
-- Solo CSV separado por comas y codificado en UTF-8 (con o sin BOM). Los CSV
-  separados por punto y coma, habituales al exportar desde Excel en configuración
-  regional española, no están soportados todavía.
+- Un archivo ilegible se detecta al llegar a la línea dañada. Sin `atomic: true`,
+  las filas anteriores ya se habrán guardado cuando se lance
+  `CsvImporter::InvalidFileError`. Con `atomic: true` no queda nada guardado.
+- `skip_lines:` cuenta líneas físicas, sin interpretar comillas.
 - Una celda vacía se convierte en `nil` y, al actualizar con `find_by`, **sobrescribe**
   el valor existente.
 - Con `find_by` de varias columnas, la búsqueda en modo normal se hace fila a fila
@@ -263,7 +404,7 @@ bundle exec rspec
 ```
 
 La estructura interna, de menor a mayor nivel: `Parser` (archivo a filas),
-`RowMapper` y `Column` (fila a atributos), `RecordPersister` / `BulkPersister`
+`RowMapper` y `Column` (fila a atributos, `defaults:` y `after_map`), `RecordPersister` / `BulkPersister`
 (atributos a base de datos, intercambiables), `Importer` (orquesta) y `Base`
 (el DSL).
 

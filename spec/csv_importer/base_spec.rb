@@ -211,3 +211,47 @@ RSpec.describe CsvImporter::Base do
     end
   end
 end
+
+RSpec.describe CsvImporter::Base, 'DSL de la v0.2.0' do
+  let(:parent) do
+    Class.new(described_class) do
+      model StatementRow
+      csv col_sep: ';', encoding: 'Windows-1252'
+      column :description, header: 'Concepto'
+      after_map { |attributes, _raw_row| attributes[:description] = attributes[:description]&.upcase }
+    end
+  end
+
+  it 'las subclases heredan csv y after_map sin alterar a la clase padre' do
+    child = Class.new(parent) do
+      csv skip_lines: 1
+      after_map ->(attributes, _raw_row) { attributes }
+    end
+
+    expect(child.definition.csv_options).to eq(col_sep: ';', encoding: 'Windows-1252', skip_lines: 1)
+    expect(child.definition.after_map_hooks.size).to eq(2)
+    expect(parent.definition.csv_options).to eq(col_sep: ';', encoding: 'Windows-1252')
+    expect(parent.definition.after_map_hooks.size).to eq(1)
+  end
+
+  it 'rechaza al declarar opciones de csv desconocidas o inválidas' do
+    expect { Class.new(described_class) { csv separator: ';' } }
+      .to raise_error(CsvImporter::ConfigurationError, /separator/)
+    expect { Class.new(described_class) { csv encoding: 'Klingon' } }
+      .to raise_error(CsvImporter::ConfigurationError, /Klingon/)
+  end
+
+  it 'exige un bloque o un objeto con call en after_map' do
+    expect { Class.new(described_class) { after_map } }
+      .to raise_error(CsvImporter::ConfigurationError, /after_map/)
+  end
+
+  it 'aplica el formato, el gancho de la clase y los defaults de la llamada' do
+    file = csv_file("Concepto;Otro\ncafetería;x\n".encode('Windows-1252'))
+
+    result = parent.new(file.path, defaults: { import_id: 9 }).call
+
+    expect(result.created).to eq(1)
+    expect(StatementRow.last).to have_attributes(description: 'CAFETERÍA', import_id: 9)
+  end
+end

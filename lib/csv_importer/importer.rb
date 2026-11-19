@@ -1,13 +1,16 @@
 # frozen_string_literal: true
 
 module CsvImporter
+  # Orquesta la importación: lee (Parser), convierte (RowMapper) y guarda (persister).
+  # Es la API pública para importar sin declarar una clase, por ejemplo con
+  # columnas construidas desde un perfil guardado en la base de datos.
   class Importer
     DEFAULT_BATCH_SIZE = 1_000
 
-    def initialize(file_path, model, columns:, atomic: false, find_by: [], bulk: false,
-                   batch_size: DEFAULT_BATCH_SIZE,
-                   parser: Parser.new(file_path),
-                   mapper: RowMapper.new(columns),
+    def initialize(file_path, model, columns:, atomic: false, find_by: [], bulk: false, # rubocop:disable Metrics/ParameterLists
+                   batch_size: DEFAULT_BATCH_SIZE, csv: {}, defaults: {}, after_map: [],
+                   parser: Parser.new(file_path, **csv),
+                   mapper: RowMapper.new(columns, defaults: defaults, after_map: after_map),
                    persister: (bulk ? BulkPersister : RecordPersister).new(model, find_by: find_by))
       @atomic = atomic
       @batch_size = batch_size

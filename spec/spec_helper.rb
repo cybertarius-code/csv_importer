@@ -20,6 +20,15 @@ ActiveRecord::Schema.define do
   create_table :tags do |t|
     t.string :label
   end
+
+  create_table :statement_rows do |t|
+    t.integer :import_id, null: false
+    t.date :date
+    t.string :description
+    t.integer :amount_cents
+    t.integer :balance_cents
+    t.string :import_ref
+  end
 end
 
 class User < ActiveRecord::Base
@@ -27,6 +36,10 @@ class User < ActiveRecord::Base
 end
 
 class Tag < ActiveRecord::Base; end
+
+class StatementRow < ActiveRecord::Base
+  validates :import_id, presence: true
+end
 
 RSpec.configure do |config|
   config.expect_with(:rspec) { |c| c.syntax = :expect }

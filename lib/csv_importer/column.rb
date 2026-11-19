@@ -1,6 +1,11 @@
 # frozen_string_literal: true
 
 module CsvImporter
+  # Una columna del CSV: de qué header se lee, cómo se convierte y en qué atributo acaba.
+  # Es API pública: se puede construir a mano para pasarla a `Importer`.
+  #
+  #   Column.new(:amount, header: "Importe", type: :decimal, required: true,
+  #                       transform: ->(value) { (value * 100).to_i })
   class Column
     attr_reader :attribute, :header
 

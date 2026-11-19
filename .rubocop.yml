@@ -1,0 +1,8 @@
+AllCops:
+  TargetRubyVersion: 3.4
+  SuggestExtensions: false
+
+# Los bloques `describe` de RSpec son largos por naturaleza
+Metrics/BlockLength:
+  Exclude:
+    - "spec/**/*"

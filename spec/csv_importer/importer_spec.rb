@@ -69,3 +69,67 @@ RSpec.describe CsvImporter::Importer do
     end
   end
 end
+
+RSpec.describe CsvImporter::Importer, 'opciones de la v0.2.0' do
+  let(:columns) do
+    [
+      CsvImporter::Column.new(:date, header: 'Fecha', required: true,
+                                     transform: ->(value) { Date.strptime(value, '%d/%m/%Y') }),
+      CsvImporter::Column.new(:description, header: 'Concepto'),
+      CsvImporter::Column.new(:amount_cents, header: 'Importe', type: :decimal,
+                                             transform: ->(value) { (value * 100).to_i })
+    ]
+  end
+
+  def import(content, **options)
+    described_class.new(csv_file(content).path, StatementRow, columns: columns, **options).call
+  end
+
+  it 'acepta Columns construidas a mano, formato del archivo y defaults' do
+    result = import("Fecha;Concepto;Importe\n03/11/2026;CAFE;-2.40\n",
+                    csv: { col_sep: ';' }, defaults: { import_id: 1 })
+
+    expect(result.created).to eq(1)
+    expect(StatementRow.last).to have_attributes(import_id: 1, date: Date.new(2026, 11, 3), amount_cents: -240)
+  end
+
+  it 'no deja que el CSV sobrescriba los defaults aunque esa columna esté declarada' do
+    columns << CsvImporter::Column.new(:import_id, type: :integer)
+
+    import("Fecha,Concepto,Importe,import_id\n03/11/2026,CAFE,-2.40,999\n", defaults: { import_id: 1 })
+
+    expect(StatementRow.last.import_id).to eq(1)
+  end
+
+  it 'reporta como error de fila un ConversionError lanzado en after_map' do
+    hook = lambda do |attributes, _raw_row|
+      raise CsvImporter::ConversionError, 'Importe: no puede ser 0' if attributes[:amount_cents].zero?
+    end
+
+    result = import("Fecha,Concepto,Importe\n03/11/2026,CAFE,-2.40\n04/11/2026,NADA,0\n",
+                    defaults: { import_id: 1 }, after_map: hook)
+
+    expect(result.created).to eq(1)
+    expect(result.errors).to eq([{ line: 3, message: 'Importe: no puede ser 0' }])
+  end
+
+  it 'deja pasar las demás excepciones de after_map' do
+    hook = ->(_attributes, _raw_row) { raise NoMethodError, 'fallo de programación' }
+
+    expect { import("Fecha,Concepto,Importe\n03/11/2026,CAFE,1\n", defaults: { import_id: 1 }, after_map: hook) }
+      .to raise_error(NoMethodError)
+  end
+
+  it 'en modo atómico, un archivo ilegible a mitad no deja nada guardado' do
+    content = "Fecha,Concepto,Importe\n03/11/2026,CAFE,1\n04/11/2026,\"ROTO,2\n"
+
+    expect { import(content, atomic: true, batch_size: 1, defaults: { import_id: 1 }) }
+      .to raise_error(CsvImporter::InvalidFileError, /línea 3/)
+    expect(StatementRow.count).to eq(0)
+  end
+
+  it 'valida los headers contra los nombres dados en headers:' do
+    expect { import("03/11/2026,CAFE,1\n", csv: { headers: %w[Fecha Concepto Precio] }) }
+      .to raise_error(CsvImporter::InvalidHeaderError, /Importe/)
+  end
+end
